@@ -16,9 +16,32 @@ use osmpbfreader::NodeId;
 use osmpbfreader::Way;
 use osmpbfreader::WayId;
 
+use num::pow;
+
 const WIDTH: u32 = 1600;
 const HEIGHT: u32 = 800;
 const MAX_LINE_COUNT: u32 = 500_000;
+
+const EARTH_RADIUS: f64 = 6371.0;
+
+fn deg2rad(deg: f64) -> f64 {
+    std::f64::consts::PI * deg / 180.0
+}
+
+// https://github.com/Aj0SK/mymap/blob/master/src/earthfunctions.h
+fn coordinate_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let lat1 = deg2rad(lat1);
+    let lon1 = deg2rad(lon1);
+    let lat2 = deg2rad(lat2);
+    let lon2 = deg2rad(lon2);
+
+    let d_lat = (lat1 - lat2).abs();
+    let d_lon = (lon1 - lon2).abs();
+
+    let a = (d_lat / 2.0).sin().powf(2.0) + lat1.cos() * lat2.cos() * (d_lon / 2.0).sin().powf(2.0);
+    let d_sigma = 2.0 * a.sqrt().asin();
+    return EARTH_RADIUS * d_sigma * 1000.0;
+}
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub struct NodeInfo {
@@ -29,7 +52,7 @@ pub struct NodeInfo {
     /// The longitude in decimicro degrees (10⁻⁷ degrees).
     pub decimicro_lon: i32,
     /// Added for easier graph implementations
-    pub reachable_ways: Vec<WayId>,
+    pub reachable_nodes: Vec<NodeId>,
 }
 
 impl From<&Node> for NodeInfo {
@@ -38,7 +61,7 @@ impl From<&Node> for NodeInfo {
             tags: n.tags.clone(),
             decimicro_lat: n.decimicro_lat,
             decimicro_lon: n.decimicro_lon,
-            reachable_ways: Vec::new(),
+            reachable_nodes: Vec::new(),
         }
     }
 }
@@ -78,7 +101,7 @@ impl Map {
 
         for (curr, _) in self.nodes.iter() {
             if !*visited.entry(*curr).or_insert(false)
-                && self.nodes.get(&curr).unwrap().reachable_ways.len() != 0
+                && self.nodes.get(&curr).unwrap().reachable_nodes.len() != 0
             {
                 components += 1;
                 let mut component_size = 1;
@@ -88,12 +111,10 @@ impl Map {
                 while !to_visit.is_empty() {
                     let node = to_visit.pop_front().unwrap();
                     component_size += 1;
-                    for way in self.nodes.get(&node).unwrap().reachable_ways.iter() {
-                        for neigh in self.ways.get(&way).unwrap().nodes.iter() {
-                            if !*visited.entry(*neigh).or_insert(false) {
-                                visited.insert(*neigh, true);
-                                to_visit.push_back(*neigh);
-                            }
+                    for neigh in self.nodes.get(&node).unwrap().reachable_nodes.iter() {
+                        if !*visited.entry(*neigh).or_insert(false) {
+                            visited.insert(*neigh, true);
+                            to_visit.push_back(*neigh);
                         }
                     }
                 }
@@ -198,13 +219,20 @@ impl MapDrawing {
     }
 }
 
+fn is_highway(way: Way) -> bool {
+    way.tags.into_inner().contains_key("highway")
+}
+
 fn main() {
-    let f = File::open("data/malta-latest.osm.pbf").unwrap();
+    let f = File::open("data/slovakia-latest.osm.pbf").unwrap();
     let mut pbf = osmpbfreader::OsmPbfReader::new(f);
 
     let mut used_ids: HashSet<NodeId> = HashSet::new();
     for obj in pbf.iter() {
         if let Some(way) = obj.unwrap().way() {
+            if !is_highway(way.clone()) {
+                continue;
+            }
             for id in way.nodes.iter() {
                 used_ids.insert(*id);
             }
@@ -229,8 +257,21 @@ fn main() {
     let mut ways: HashMap<WayId, WayInfo> = HashMap::new();
     for obj in pbf.iter() {
         if let Some(way) = obj.unwrap().way() {
-            for id in way.nodes.iter() {
-                nodes.get_mut(&id).unwrap().reachable_ways.push(way.id);
+            if !is_highway(way.clone()) {
+                continue;
+            }
+            for i in 0..way.nodes.len() - 1 {
+                nodes
+                    .get_mut(&way.nodes[i])
+                    .unwrap()
+                    .reachable_nodes
+                    .push(way.nodes[i + 1]);
+
+                nodes
+                    .get_mut(&way.nodes[i + 1])
+                    .unwrap()
+                    .reachable_nodes
+                    .push(way.nodes[i]);
             }
             ways.insert(way.id, WayInfo::from(way));
         }
