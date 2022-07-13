@@ -1,10 +1,7 @@
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
-use sdl2::mouse::MouseButton;
 use sdl2::pixels::Color;
 use sdl2::rect::Point;
-use sdl2::render::Canvas;
-use sdl2::video::Window;
 
 use std::cmp::{max, min};
 use std::time::Duration;
@@ -13,12 +10,15 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::process::exit;
 
 use osmpbfreader::Node;
 use osmpbfreader::NodeId;
 use osmpbfreader::Way;
 use osmpbfreader::WayId;
+
+const WIDTH: u32 = 1600;
+const HEIGHT: u32 = 800;
+const MAX_LINE_COUNT: u32 = 500_000;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub struct NodeInfo {
@@ -43,6 +43,7 @@ impl From<&Node> for NodeInfo {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub struct WayInfo {
     /// The tags of the way.
     pub tags: osmpbfreader::Tags,
@@ -59,44 +60,51 @@ impl From<&Way> for WayInfo {
     }
 }
 
-fn check_connectivity(nodes: HashMap<NodeId, NodeInfo>, ways: HashMap<WayId, WayInfo>) {
-    let mut visited: HashMap<NodeId, bool> = HashMap::new();
-    let mut to_visit: VecDeque<NodeId> = VecDeque::new();
+#[derive(Debug, Clone)]
+struct Map {
+    nodes: HashMap<NodeId, NodeInfo>,
+    ways: HashMap<WayId, WayInfo>,
+}
 
-    let mut components = 0;
+impl Map {
+    pub fn new(nodes: HashMap<NodeId, NodeInfo>, ways: HashMap<WayId, WayInfo>) -> Self {
+        Self { nodes, ways }
+    }
 
-    for (curr, _) in nodes.iter() {
-        if !*visited.entry(*curr).or_insert(false)
-            && nodes.get(&curr).unwrap().reachable_ways.len() != 0
-        {
-            components += 1;
-            let mut component_size = 1;
-            to_visit.push_back(*curr);
-            visited.insert(*curr, true);
+    pub fn check_connectivity(&self) -> i32 {
+        let mut visited: HashMap<NodeId, bool> = HashMap::new();
+        let mut to_visit: VecDeque<NodeId> = VecDeque::new();
+        let mut components = 0;
 
-            while !to_visit.is_empty() {
-                let node = to_visit.pop_front().unwrap();
-                component_size += 1;
-                for way in nodes.get(&node).unwrap().reachable_ways.iter() {
-                    for neigh in ways.get(&way).unwrap().nodes.iter() {
-                        if !*visited.entry(*neigh).or_insert(false) {
-                            visited.insert(*neigh, true);
-                            to_visit.push_back(*neigh);
+        for (curr, _) in self.nodes.iter() {
+            if !*visited.entry(*curr).or_insert(false)
+                && self.nodes.get(&curr).unwrap().reachable_ways.len() != 0
+            {
+                components += 1;
+                let mut component_size = 1;
+                to_visit.push_back(*curr);
+                visited.insert(*curr, true);
+
+                while !to_visit.is_empty() {
+                    let node = to_visit.pop_front().unwrap();
+                    component_size += 1;
+                    for way in self.nodes.get(&node).unwrap().reachable_ways.iter() {
+                        for neigh in self.ways.get(&way).unwrap().nodes.iter() {
+                            if !*visited.entry(*neigh).or_insert(false) {
+                                visited.insert(*neigh, true);
+                                to_visit.push_back(*neigh);
+                            }
                         }
                     }
                 }
-            }
-            if component_size > 500 {
-                println!("Component size is {}", component_size);
+                if component_size > 500 {
+                    println!("Component size is {}", component_size);
+                }
             }
         }
+        return components;
     }
-    println!("Number of components is {}", components);
 }
-
-const WIDTH: u32 = 1600;
-const HEIGHT: u32 = 800;
-const MAX_LINE_COUNT: u32 = 500_000;
 
 struct MapDrawing {}
 
@@ -104,7 +112,7 @@ impl MapDrawing {
     pub fn new() -> Self {
         Self {}
     }
-    pub fn draw(&self, nodes: HashMap<NodeId, NodeInfo>, ways: HashMap<WayId, WayInfo>) {
+    pub fn draw(&self, map: Map) {
         let sdl_context = sdl2::init().unwrap();
         let video_subsystem = sdl_context.video().unwrap();
         let window = video_subsystem
@@ -122,7 +130,7 @@ impl MapDrawing {
             // drawing
             let mut draw_counter = 0;
             let mut to_draw: Vec<(&NodeInfo, &NodeInfo)> = Vec::new();
-            for (_, way_info) in ways.iter() {
+            for (_, way_info) in map.ways.iter() {
                 draw_counter += 1;
                 if draw_counter == MAX_LINE_COUNT {
                     break;
@@ -131,8 +139,8 @@ impl MapDrawing {
                     let from_id = way_info.nodes[i];
                     let to_id = way_info.nodes[i + 1];
 
-                    let node_info_from = nodes.get(&from_id).unwrap();
-                    let node_info_to = nodes.get(&to_id).unwrap();
+                    let node_info_from = map.nodes.get(&from_id).unwrap();
+                    let node_info_to = map.nodes.get(&to_id).unwrap();
 
                     to_draw.push((node_info_from, node_info_to));
                 }
@@ -191,29 +199,22 @@ impl MapDrawing {
 }
 
 fn main() {
-    let f = File::open("data/slovakia-latest.osm.pbf").unwrap();
+    let f = File::open("data/malta-latest.osm.pbf").unwrap();
     let mut pbf = osmpbfreader::OsmPbfReader::new(f);
 
     let mut used_ids: HashSet<NodeId> = HashSet::new();
-
     for obj in pbf.iter() {
-        // error handling:
-        let obj = obj.unwrap_or_else(|e| {
-            println!("{:?}", e);
-            exit(1)
-        });
-        if let Some(way) = obj.way() {
+        if let Some(way) = obj.unwrap().way() {
             for id in way.nodes.iter() {
                 used_ids.insert(*id);
             }
         }
     }
-
     used_ids.shrink_to_fit();
 
-    let mut nodes = HashMap::new();
-
     pbf.rewind().unwrap();
+
+    let mut nodes = HashMap::new();
     for obj in pbf.iter() {
         if let Some(node) = obj.unwrap().node() {
             if used_ids.contains(&node.id) {
@@ -223,29 +224,24 @@ fn main() {
     }
 
     drop(used_ids);
+    pbf.rewind().unwrap();
 
     let mut ways: HashMap<WayId, WayInfo> = HashMap::new();
-
-    pbf.rewind().unwrap();
     for obj in pbf.iter() {
-        // error handling:
-        let obj = obj.unwrap_or_else(|e| {
-            println!("{:?}", e);
-            exit(1)
-        });
-        if let Some(way) = obj.way() {
+        if let Some(way) = obj.unwrap().way() {
             for id in way.nodes.iter() {
                 nodes.get_mut(&id).unwrap().reachable_ways.push(way.id);
             }
             ways.insert(way.id, WayInfo::from(way));
         }
     }
-
     nodes.shrink_to_fit();
     ways.shrink_to_fit();
 
-    //check_connectivity(nodes, ways);
+    let map = Map::new(nodes, ways);
+
+    println!("Number of components is {}", map.check_connectivity());
 
     let draw = MapDrawing::new();
-    draw.draw(nodes, ways);
+    draw.draw(map);
 }
